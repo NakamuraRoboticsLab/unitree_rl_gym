@@ -319,7 +319,7 @@ if __name__ == "__main__":
                     # load motion data once lazily
                     if "_motion_cache" not in globals():
                         globals()["_motion_cache"] = np.load(
-                            f"{LEGGED_GYM_ROOT_DIR}/deploy/deploy_real/bydmimic/dance_zui.npz"
+                            f"{LEGGED_GYM_ROOT_DIR}/deploy/deploy_mujoco/bydmimic/dance1.npz"
                         )
                     motion = globals()["_motion_cache"]
                     motionpos = motion["body_pos_w"]
@@ -340,35 +340,88 @@ if __name__ == "__main__":
                     qj_obs = qj.copy()
                     dqj_obs = dqj.copy()
 
-                    motioninput = np.concatenate(
+                    # ------------------------------------------------------------------
+                    # Observation construction aligned with training-time PolicyCfg:
+                    #   [command,
+                    #    motion_anchor_pos_b, motion_anchor_ori_b,
+                    #    base_lin_vel, base_ang_vel,
+                    #    joint_pos_rel, joint_vel_rel,
+                    #    actions]
+                    # ------------------------------------------------------------------
+
+                    # command term: reference motion joint pos/vel
+                    cmd_joint_dim = motioninputpos.shape[1]
+                    command = np.concatenate(
                         (motioninputpos[timestep, :], motioninputvel[timestep, :]), axis=0
                     )
-                    motionquatcurrent = motionquat[timestep, 9, :]
 
-                    relquat = quaternion_multiply(matrix_to_quaternion_simple(init_to_world), motionquatcurrent)
-                    relquat = quaternion_multiply(quaternion_conjugate(quat_torso), relquat)
-                    relquat = relquat / np.linalg.norm(relquat)
-                    relmatrix = quaternion_to_rotation_matrix(relquat)[:, :2].reshape(-1,)
+                    # motion anchor (from reference motion) and robot anchor (from Mujoco)
+                    # here we use body index 9 from the motion file as anchor, consistent
+                    # with how torso is used in the original real deployment.
+                    anchor_pos_w = motionpos[timestep, 9, :]
+                    anchor_quat_w = motionquat[timestep, 9, :]
 
-                    offset = 0
-                    obs[offset : offset + 58] = motioninput
-                    offset += 58
-                    obs[offset : offset + 6] = relmatrix
-                    offset += 6
-                    obs[offset : offset + 3] = omega
-                    offset += 3
+                    # robot anchor: use base position and torso orientation in world frame
+                    robot_anchor_pos_w = d.qpos[0:3].copy()
+                    robot_anchor_quat_w = quat_torso
 
-                    # reorder q, dq to policy joint order
+                    # relative transform from robot anchor frame to motion anchor frame
+                    R_robot = quaternion_to_rotation_matrix(robot_anchor_quat_w)
+                    motion_anchor_pos_b = R_robot.T @ (anchor_pos_w - robot_anchor_pos_w)
+
+                    rel_quat = quaternion_multiply(
+                        quaternion_conjugate(robot_anchor_quat_w), anchor_quat_w
+                    )
+                    rel_quat = rel_quat / np.linalg.norm(rel_quat)
+                    rel_mat = quaternion_to_rotation_matrix(rel_quat)
+                    motion_anchor_ori_b = rel_mat[:, :2].reshape(-1,)
+
+                    # base linear / angular velocity in world frame
+                    base_lin_vel = d.qvel[0:3].copy()
+                    base_ang_vel = omega
+
+                    # reorder q, dq to policy joint order (joint_pos_rel, joint_vel_rel)
                     qpos_urdf = qj_obs
                     dqpos_urdf = dqj_obs
                     qj_obs_seq = np.array([qpos_urdf[joint_xml.index(j)] for j in joint_seq])
                     dqj_obs_seq = np.array([dqpos_urdf[joint_xml.index(j)] for j in joint_seq])
 
-                    obs[offset : offset + num_actions] = qj_obs_seq - default_angles_seq
+                    joint_pos_rel = qj_obs_seq - default_angles_seq
+                    joint_vel_rel = dqj_obs_seq
+
+                    # fill observation vector in the exact order used in training
+                    offset = 0
+                    obs[offset : offset + command.shape[0]] = command
+                    offset += command.shape[0]
+
+                    obs[offset : offset + 3] = motion_anchor_pos_b
+                    offset += 3
+
+                    obs[offset : offset + 6] = motion_anchor_ori_b
+                    offset += 6
+
+                    obs[offset : offset + 3] = base_lin_vel
+                    offset += 3
+
+                    obs[offset : offset + 3] = base_ang_vel
+                    offset += 3
+
+                    obs[offset : offset + num_actions] = joint_pos_rel
                     offset += num_actions
-                    obs[offset : offset + num_actions] = dqj_obs_seq
+
+                    obs[offset : offset + num_actions] = joint_vel_rel
                     offset += num_actions
+
                     obs[offset : offset + num_actions] = action_buffer
+                    offset += num_actions
+
+                    # quick consistency check (only print once if mismatch)
+                    if offset != num_obs and timestep == 0:
+                        print(
+                            "[bydmimic] Warning: obs length mismatch:",
+                            "filled =", offset,
+                            "expected =", num_obs,
+                        )
 
                     # Debug: inspect observation content and shapes in early timesteps
                     if timestep < 20:
@@ -376,8 +429,11 @@ if __name__ == "__main__":
                         print("  obs shape:", obs.shape)
                         print("  obs has nan:", np.isnan(obs).any())
                         print("  obs min/max/mean:", obs.min(), obs.max(), obs.mean())
-                        print("  motioninput shape:", motioninput.shape)
-                        print("  relmatrix shape:", relmatrix.shape)
+                        print("  command shape:", command.shape)
+                        print("  motion_anchor_pos_b shape:", motion_anchor_pos_b.shape)
+                        print("  motion_anchor_ori_b shape:", motion_anchor_ori_b.shape)
+                        print("  base_lin_vel shape:", base_lin_vel.shape)
+                        print("  base_ang_vel shape:", base_ang_vel.shape)
                         print("  qj_obs_seq shape:", qj_obs_seq.shape)
                         print("  dqj_obs_seq shape:", dqj_obs_seq.shape)
                         print("  action_buffer shape:", action_buffer.shape)

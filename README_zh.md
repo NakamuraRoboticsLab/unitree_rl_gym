@@ -107,6 +107,11 @@ python deploy/deploy_mujoco/deploy_mujoco.py {config_name}
 python deploy/deploy_mujoco/deploy_mujoco.py g1.yaml
 ```
 
+#### BeyondMimic test: 
+```bash
+python deploy/deploy_mujoco/deploy_mujoco4bydmimic.py g1_for_bydmimic.yaml
+```
+
 #### ➡️  替换网络模型
 
 默认模型位于 `deploy/pre_train/{robot}/motion.pt`；自己训练模型保存于`logs/g1/exported/policies/policy_lstm_1.pt`，只需替换 yaml 配置文件中 `policy_path`。
